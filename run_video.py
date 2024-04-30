@@ -4,6 +4,7 @@ import numpy as np
 import os
 import torch
 import torch.nn.functional as F
+import time
 from torchvision.transforms import Compose
 
 from depth_anything.dpt import DepthAnything
@@ -64,8 +65,28 @@ if __name__ == '__main__':
         
         filename = os.path.basename(filename)
         output_path = os.path.join(args.outdir, filename[:filename.rfind('.')] + '_video_depth.mp4')
-        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), frame_rate, (output_width, frame_height))
+        out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*"mp4v"), frame_rate, (frame_width, frame_height))
+
+        prev_depth = None
         
+        bottom_width_ratio = 1/3  # Bottom width as a ratio of frame width
+        top_width_ratio = 1/6     # Top width as a ratio of frame width
+        speed = 10                # Example speed variable, adjust as needed
+        danger_threshold = 70     # Example danger threshold, adjust as needed
+
+        temp = time.time()
+        frame_center_x = frame_width // 2
+        bottom_width = int(frame_width * bottom_width_ratio)
+        top_width = int(frame_width * top_width_ratio)
+        top_x1 = frame_center_x - top_width // 2
+        top_x2 = frame_center_x + top_width // 2
+        bottom_x1 = frame_center_x - bottom_width // 2
+        bottom_x2 = frame_center_x + bottom_width // 2
+        top_y = int(frame_height - speed*10)  # Adjust top y-coordinate based on speed
+        depth_threshold = 30
+
+        speed = 10
+
         while raw_video.isOpened():
             ret, raw_frame = raw_video.read()
             if not ret:
@@ -83,12 +104,27 @@ if __name__ == '__main__':
             depth = (depth - depth.min()) / (depth.max() - depth.min()) * 255.0
             
             depth = depth.cpu().numpy().astype(np.uint8)
-            depth_color = cv2.applyColorMap(depth, cv2.COLORMAP_INFERNO)
             
-            split_region = np.ones((frame_height, margin_width, 3), dtype=np.uint8) * 255
-            combined_frame = cv2.hconcat([raw_frame, split_region, depth_color])
+            if prev_depth is not None:
+                depth_gradient = cv2.absdiff(depth, prev_depth)*5
+                depth_original = depth_gradient.copy()
+
+                # Create a mask where depth values are significant
+                mask = depth_gradient < depth_threshold
+                mask = np.stack([mask]*3, axis=-1)  # Make the mask 3-channel
+
+                # Create a filtered color depth map for visualization
+                depth_gradient_color = cv2.applyColorMap(depth_gradient, cv2.COLORMAP_COOL)
+                depth_masked = np.where(mask, raw_frame, depth_gradient_color)
+
+                trapezoid_bbox = np.array([[(bottom_x1, frame_height), (top_x1, top_y), (top_x2, top_y), (bottom_x2, frame_height)]], dtype=np.int32)
+                cv2.drawContours(depth_masked, trapezoid_bbox, -1, (0, 255, 0))
+                if np.any(depth_gradient[top_y:, bottom_x1:bottom_x2] > danger_threshold):
+                    cv2.putText(depth_masked, "Danger", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2, cv2.LINE_AA)
+                out.write(depth_masked)
             
-            out.write(combined_frame)
+            prev_depth = depth
+        print(time.time()-temp)
         
         raw_video.release()
         out.release()
